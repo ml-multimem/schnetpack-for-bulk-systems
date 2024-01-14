@@ -10,14 +10,13 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import LightningModule, LightningDataModule, Callback, Trainer
 from pytorch_lightning import seed_everything
-from pytorch_lightning.loggers.logger import Logger
+from pytorch_lightning.loggers import LightningLoggerBase
 
 import schnetpack as spk
 from schnetpack.utils import str2class
 from schnetpack.utils.script import log_hyperparameters, print_config
 from schnetpack.data import BaseAtomsData, AtomsLoader
 from schnetpack.train import PredictionWriter
-from schnetpack import properties
 
 log = logging.getLogger(__name__)
 
@@ -74,13 +73,13 @@ def train(config: DictConfig):
             OmegaConf.save(old_config, f, resolve=False)
 
         # resume from latest checkpoint
-        if config.run.ckpt_path is None:
+        if config.trainer.resume_from_checkpoint is None:
             if os.path.exists("checkpoints/last.ckpt"):
-                config.run.ckpt_path = "checkpoints/last.ckpt"
+                config.trainer.resume_from_checkpoint = "checkpoints/last.ckpt"
 
-        if config.run.ckpt_path is not None:
+        if config.trainer.resume_from_checkpoint is not None:
             log.info(
-                f"Resuming from checkpoint {os.path.abspath(config.run.ckpt_path)}"
+                f"Resuming from checkpoint {os.path.abspath(config.trainer.resume_from_checkpoint)}"
             )
     else:
         with open("config.yaml", "w") as f:
@@ -130,7 +129,7 @@ def train(config: DictConfig):
                 callbacks.append(hydra.utils.instantiate(cb_conf))
 
     # Init Lightning loggers
-    logger: List[Logger] = []
+    logger: List[LightningLoggerBase] = []
 
     if "logger" in config:
         for _, lg_conf in config["logger"].items():
@@ -155,7 +154,7 @@ def train(config: DictConfig):
 
     # Train the model
     log.info("Starting training.")
-    trainer.fit(model=task, datamodule=datamodule, ckpt_path=config.run.ckpt_path)
+    trainer.fit(model=task, datamodule=datamodule)
 
     # Evaluate model on test set after training
     log.info("Starting testing.")
@@ -182,35 +181,23 @@ def predict(config: DictConfig):
     model = torch.load("best_model")
 
     class WrapperLM(LightningModule):
-        def __init__(self, model, enable_grad=config.enable_grad):
+        def __init__(self, model):
             super().__init__()
             self.model = model
-            self.enable_grad = enable_grad
 
         def forward(self, x):
             return model(x)
-
-        def predict_step(self, batch, batch_idx: int, dataloader_idx: int = 0):
-            torch.set_grad_enabled(self.enable_grad)
-            results = self(batch)
-            results[properties.idx_m] = batch[properties.idx][batch[properties.idx_m]]
-            results = {k: v.detach().cpu() for k, v in results.items()}
-            return results
-
 
     log.info(f"Instantiating trainer <{config.trainer._target_}>")
     trainer: Trainer = hydra.utils.instantiate(
         config.trainer,
         callbacks=[
             PredictionWriter(
-                output_dir=config.outputdir, write_interval=config.write_interval, write_idx=config.write_idx_m
+                output_dir=config.outputdir, write_interval=config.write_interval
             )
         ],
         default_root_dir=".",
+        resume_from_checkpoint="checkpoints/last.ckpt",
         _convert_="partial",
     )
-    trainer.predict(
-        WrapperLM(model, config.enable_grad),
-        dataloaders=loader,
-        ckpt_path=config.ckpt_path,
-    )
+    trainer.predict(WrapperLM(model), dataloaders=loader)

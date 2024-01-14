@@ -132,6 +132,9 @@ class Simulator(nn.Module):
                 # Do propagation MD/PIMD
                 self.integrator.main_step(self.system)
 
+                # Make sure coords are wapped
+                self.system.wrap_positions()
+                
                 # Compute new forces
                 self.calculator.calculate(self.system)
 

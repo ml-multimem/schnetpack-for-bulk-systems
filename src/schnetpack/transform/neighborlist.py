@@ -20,6 +20,8 @@ __all__ = [
     "WrapPositions",
     "SkinNeighborList",
     "FilterNeighbors",
+    "MultipleNeighborList",
+    "CachedMultipleNeighborList"
 ]
 
 import schnetpack as spk
@@ -275,9 +277,14 @@ class SkinNeighborList(Transform):
             nbh_transforms: transforms for manipulating the neighbor lists
                 provided by neighbor_list
             cutoff_skin: float
-                If no atom has moved more than cutoff_skin/2 since the neighbor list
-                has been updated the last time, then the neighbor list is reused.
-                This will save some expensive rebuilds of the list.
+                If no atom has moved more than the skin-distance since the neighbor list
+                    has been updated the last time, then the neighbor list is reused.
+                    This will save some expensive rebuilds of the list.
+
+        Note:
+            Please choose a sufficiently large cutoff_skin value to ensure that between
+            two subsequent samples no atom can penetrate through the skin into the
+            cutoff sphere of another atom if it is not in the neighbor list of that atom.
         """
 
         super().__init__()
@@ -356,13 +363,13 @@ class SkinNeighborList(Transform):
             ):
                 # reuse previous neighbor list
                 inputs[properties.idx_i] = (
-                    previous_inputs[properties.idx_i].clone()
+                    previous_inputs[properties.idx_i].detach().clone()
                 )
                 inputs[properties.idx_j] = (
-                    previous_inputs[properties.idx_j].clone()
+                    previous_inputs[properties.idx_j].detach().clone()
                 )
                 inputs[properties.offsets] = (
-                    previous_inputs[properties.offsets].clone()
+                    previous_inputs[properties.offsets].detach().clone()
                 )
                 return False, inputs
 
@@ -380,12 +387,12 @@ class SkinNeighborList(Transform):
         # store new reference conformation and remove old one
         sample_idx = inputs[properties.idx].item()
         stored_inputs = {
-            properties.R: inputs[properties.R].detach().clone(),
-            properties.cell: inputs[properties.cell].detach().clone(),
-            properties.pbc: inputs[properties.pbc].detach().clone(),
-            properties.idx_i: inputs[properties.idx_i].detach().clone(),
-            properties.idx_j: inputs[properties.idx_j].detach().clone(),
-            properties.offsets: inputs[properties.offsets].detach().clone(),
+            properties.R: inputs[properties.R].clone(),
+            properties.cell: inputs[properties.cell].clone(),
+            properties.pbc: inputs[properties.pbc].clone(),
+            properties.idx_i: inputs[properties.idx_i].clone(),
+            properties.idx_j: inputs[properties.idx_j].clone(),
+            properties.offsets: inputs[properties.offsets].clone(),
         }
         self.previous_inputs.update({sample_idx: stored_inputs})
 
@@ -681,3 +688,260 @@ class WrapPositions(Transform):
         inputs[properties.R] = R_wrapped
 
         return inputs
+
+
+class MultipleNeighborList(Transform):
+    is_preprocessor: bool = True
+    is_postprocessor: bool = False
+
+    def __init__(
+        self,
+        cutoff: float,
+        requested_lists: List[str] = ["bonded"],
+    ):
+        """
+        Args:
+            cutoff: Cutoff radius for neighbor search.
+            requested_lists: reduced versions of the parwise distances to compute.
+                Accepted values:
+                - bonded: perform the calculation only for the particles listed in `inputs[properties.bonds_list]`
+                - nonbonded: perform the calculation only for the particles not listed in `inputs[properties.bonds_list]`
+                - intermolecular: perform the calculation only for pairs of particles belonging to different molecules
+                - intramolecular: perform the calculation only for pairs of particles belonging to the same molecule
+                
+        """
+        super(MultipleNeighborList, self).__init__()
+        self._cutoff = cutoff
+        self.requested_lists = list(requested_lists)
+
+    def _build_neighbor_list(self, Z, positions, cell, pbc, cutoff):
+        at = Atoms(numbers=Z, positions=positions, cell=cell, pbc=pbc)
+
+        idx_i, idx_j, S = ase_neighbor_list("ijS", at, cutoff, self_interaction=False)
+        idx_i = torch.from_numpy(idx_i)
+        idx_j = torch.from_numpy(idx_j)
+        S = torch.from_numpy(S).to(dtype=positions.dtype)
+        offset = torch.mm(S, cell)
+        return idx_i, idx_j, offset
+
+    def forward(
+        self,
+        inputs: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        
+        Z = inputs[properties.Z]
+        R = inputs[properties.R]
+        cell = inputs[properties.cell].view(3, 3)
+        pbc = inputs[properties.pbc]
+
+        idx_i, idx_j, offset = self._build_neighbor_list(Z, R, cell, pbc, self._cutoff)
+        inputs[properties.idx_i] = idx_i.detach()
+        inputs[properties.idx_j] = idx_j.detach()
+        inputs[properties.offsets] = offset
+
+        if ("bonded" in self.requested_lists) or ("nonbonded" in self.requested_lists):
+            # List of bonded pairs
+            bonds = inputs[properties.bonds_list]
+            # Number of bonds in the system
+            n_bonds = bonds.shape[0]
+            
+            # list of indices of occurences of the first bonded particle in the 
+            # full neighbors list, for all bonded pairs
+            b1 = [torch.where(idx_i==bonds[b][0]) for b in range(n_bonds)] 
+            c1 = [torch.where(idx_i==bonds[b][1]) for b in range(n_bonds)]
+            list1 = b1 + c1 # for lists + concatenates
+
+            # list of indices of occurences of the second bonded particle in the
+            # full neighbors list, for all bonded pairs
+            b2 = [torch.where(idx_j==bonds[b][1]) for b in range(n_bonds)] 
+            c2 = [torch.where(idx_j==bonds[b][0]) for b in range(n_bonds)]
+            list2 = b2 + c2 # for lists + concatenates 
+
+
+            # Initialize the list of bonded pairs indices to filter the full distances list
+            a = list1[0][0]
+            b = list2[0][0]
+            new_idx = a[torch.isin(a, b)]
+            device = inputs[properties.idx_i].device
+            idx_of_bonds = torch.tensor([new_idx]).to(torch.long).to(device)
+
+            # For each bond
+            for n in range(1, n_bonds*2):
+                # List of indices where the first particle appears in the full distances list
+                a = list1[n][0]
+                # List of indices where the second particle appears in the full distances list
+                b = list2[n][0]
+                # With torch.isin(a, b) we check if an index present in the variable a is also included in the variable b
+                # This means that this is the index of the bonded pair in the full distances list
+                # We extract the actual value from a and we append it to the list of bonded pairs indices
+                new_idx = a[torch.isin(a, b)]
+                idx_of_bonds = torch.cat((idx_of_bonds, new_idx.to(torch.long)), 0) 
+            
+            inputs[properties.idx_of_bonds] = idx_of_bonds.detach()           
+            
+            if "nonbonded" in self.requested_lists:
+                # Create the list of indices and remove the ones contained in idx_of_bonds
+                idx_non_bonds = torch.arange(0, idx_i.size()[0]).to(torch.long)
+                for idx in range(len(idx_of_bonds)):
+                    v = idx_of_bonds[-(idx + 1)]
+                    idx_non_bonds = torch.cat([idx_non_bonds[0:v], idx_non_bonds[v+1:]])
+                inputs[properties.idx_non_bonds] = idx_non_bonds.detach()
+
+        if "intramolecular" in self.requested_lists:    
+            # List of molecule membership for every particle
+            mol_ids = inputs[properties.molecule_ids]
+            idx_of_intra = [torch.tensor([i]).to(torch.long) for i in range(len(idx_i)) if mol_ids[idx_i[i]]==mol_ids[idx_j[i]] ]
+            inputs[properties.idx_of_intra] = torch.stack(idx_of_intra).squeeze().detach()
+
+        if "intermolecular" in self.requested_lists:
+            mol_ids = inputs[properties.molecule_ids]
+            idx_of_inter = [torch.tensor([i]).to(torch.long) for i in range(len(idx_i)) if mol_ids[idx_i[i]]!=mol_ids[idx_j[i]] ]      
+            inputs[properties.idx_of_inter] = torch.stack(idx_of_inter).squeeze().detach()    
+
+        return inputs
+    
+
+class CachedMultipleNeighborList(Transform):
+    """
+    Dynamic caching of neighbor lists with multiple lists.
+    This wraps a neighbor list and stores the results the first time it is called
+    for a dataset entry with the pid provided by AtomsDataset. Particularly,
+    for large systems, this speeds up training significantly.
+
+    Note:
+        The provided cache location should be unique to the used dataset. Otherwise,
+        wrong neighborhoods will be provided. The caching location can be reused
+        across multiple runs, by setting `keep_cache=True`.
+    """
+
+    is_preprocessor: bool = True
+    is_postprocessor: bool = False
+
+    def __init__(
+        self,
+        cache_path: str,
+        neighbor_list: Transform,
+        nbh_transforms: Optional[List[torch.nn.Module]] = None,
+        keep_cache: bool = False,
+        cache_workdir: str = None,
+        requested_lists: List[str] = ["bonded"],
+    ):
+        """
+        Args:
+            cache_path: Path of caching directory.
+            neighbor_list: the neighbor list to use. Should be MultipleNeighborList or 
+                an extension of it.
+            nbh_transforms: transforms for manipulating the neighbor lists
+                provided by neighbor_list
+            keep_cache: Keep cache at `cache_location` at the end of training, or copy
+                built/updated cache there from `cache_workdir` (if set). A pre-existing
+                cache at `cache_location` will not be deleted, while a temporary cache
+                at `cache_workdir` will always be removed.
+            cache_workdir: If this is set, the cache will be build here, e.g. a cluster
+                scratch space for faster performance. An existing cache at
+                `cache_location` is copied here at the beginning of training, and
+                afterwards (if `keep_cache=True`) the final cache is copied to
+                `cache_workdir`.
+            requested_lists: reduced versions of the parwise distances to compute.
+                Accepted values:
+                - bonded: perform the calculation only for the particles listed in `inputs[properties.bonds_list]`
+                - nonbonded: perform the calculation only for the particles not listed in `inputs[properties.bonds_list]`
+                - intermolecular: perform the calculation only for pairs of particles belonging to different molecules
+                - intramolecular: perform the calculation only for pairs of particles belonging to the same molecule
+                
+        """
+        super().__init__()
+        self.neighbor_list = neighbor_list
+        self.nbh_transforms = nbh_transforms or []
+        self.keep_cache = keep_cache
+        self.cache_path = cache_path
+        self.cache_workdir = cache_workdir
+        self.preexisting_cache = os.path.exists(self.cache_path)
+        self.has_tmp_workdir = cache_workdir is not None
+        self.requested_lists = list(requested_lists)
+
+        os.makedirs(cache_path, exist_ok=True)
+
+        if self.has_tmp_workdir:
+            # cache workdir should be empty to avoid loading nbh lists from earlier runs
+            if os.path.exists(cache_workdir):
+                raise CacheException("The provided `cache_workdir` already exists!")
+
+            # copy existing nbh lists to cache workdir
+            if self.preexisting_cache:
+                shutil.copytree(cache_path, cache_workdir)
+            self.cache_location = cache_workdir
+        else:
+            # use cache_location to store and load neighborlists
+            self.cache_location = cache_path
+
+    def forward(
+        self,
+        inputs: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        cache_file = os.path.join(
+            self.cache_location, f"cache_{inputs[properties.idx][0]}.pt"
+        )
+
+        # try to read cached NBL
+        try:
+            data = torch.load(cache_file)
+            inputs.update(data)
+        except IOError:
+            # acquire lock for caching
+            lock = fasteners.InterProcessLock(
+                os.path.join(
+                    self.cache_location, f"cache_{inputs[properties.idx][0]}.lock"
+                )
+            )
+            with lock:
+                # retry reading, in case other process finished in the meantime
+                try:
+                    data = torch.load(cache_file)
+                    inputs.update(data)
+                except IOError:
+                    # now it is save to calculate and cache
+                    inputs = self.neighbor_list(inputs)
+                    for nbh_transform in self.nbh_transforms:
+                        inputs = nbh_transform(inputs)
+                    data = {
+                        properties.idx_i: inputs[properties.idx_i],
+                        properties.idx_j: inputs[properties.idx_j],
+                        properties.offsets: inputs[properties.offsets],                        
+                    }
+
+                    if "bonded" in self.requested_lists:
+                        data[properties.idx_of_bonds] = inputs[properties.idx_of_bonds]
+
+                    if "nonbonded" in self.requested_lists:
+                        data[properties.idx_non_bonds] = inputs[properties.idx_non_bonds]
+
+                    if "intermolecular" in self.requested_lists:
+                        data[properties.idx_of_inter] = inputs[properties.idx_of_inter]
+
+                    if "intramolecular" in self.requested_lists:
+                        data[properties.idx_of_intra] = inputs[properties.idx_of_intra]
+
+                    torch.save(data, cache_file)
+                except Exception as e:
+                    print(e)
+        return inputs
+
+    def teardown(self):
+        if not self.keep_cache and not self.preexisting_cache:
+            try:
+                shutil.rmtree(self.cache_path)
+            except:
+                pass
+
+        if self.cache_workdir is not None:
+            if self.keep_cache:
+                try:
+                    sync(self.cache_workdir, self.cache_path, "sync")
+                except:
+                    pass
+
+            try:
+                shutil.rmtree(self.cache_workdir)
+            except:
+                pass

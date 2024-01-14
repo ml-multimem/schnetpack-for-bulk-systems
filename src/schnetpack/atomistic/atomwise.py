@@ -1,4 +1,4 @@
-from typing import Sequence, Union, Callable, Dict, Optional
+from typing import Sequence, Union, Callable, Dict, Optional, List
 
 import torch
 import torch.nn as nn
@@ -8,7 +8,7 @@ import schnetpack as spk
 import schnetpack.nn as snn
 import schnetpack.properties as properties
 
-__all__ = ["Atomwise", "DipoleMoment", "Polarizability"]
+__all__ = ["Atomwise", "DipoleMoment", "Polarizability", "AtomwiseWithPrior"]
 
 
 class Atomwise(nn.Module):
@@ -47,8 +47,6 @@ class Atomwise(nn.Module):
         self.output_key = output_key
         self.model_outputs = [output_key]
         self.per_atom_output_key = per_atom_output_key
-        if self.per_atom_output_key is not None:
-            self.model_outputs.append(self.per_atom_output_key)
         self.n_out = n_out
 
         if aggregation_mode is None and self.per_atom_output_key is None:
@@ -69,10 +67,6 @@ class Atomwise(nn.Module):
     def forward(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         # predict atomwise contributions
         y = self.outnet(inputs["scalar_representation"])
-
-        # accumulate the per-atom output if necessary
-        if self.per_atom_output_key is not None:
-            inputs[self.per_atom_output_key] = y
 
         # aggregate
         if self.aggregation_mode is not None:
@@ -290,4 +284,77 @@ class Polarizability(nn.Module):
         alpha = snn.scatter_add(alpha, idx_m, dim_size=maxm)
 
         inputs[self.polarizability_key] = alpha
+        return inputs
+
+
+class AtomwiseWithPrior(nn.Module):
+    """
+    Predicts atom-wise contributions calling an Atomwise module and combines them 
+    with a list of prior energy terms. 
+    """
+
+    def __init__(
+        self,
+        n_in: int,
+        n_out: int = 1,
+        prior: List[torch.nn.Module] = [],
+        n_hidden: Optional[Union[int, Sequence[int]]] = None,
+        n_layers: int = 2,
+        activation: Callable = F.silu,
+        aggregation_mode: str = "sum",
+        output_key: str = "energy",
+        per_atom_output_key: Optional[str] = None,
+        combination_mode: str = "sum"
+    ):
+        """
+        Args:
+                prior: Modules list whose output needs to be combined with the output of Atomwise. In the 
+                    input script it needs to be provided as a list even if it contains only one entry.
+                combination_mode: arithmetic operation to perform between the atomwise and the prior outputs
+            
+            Parameters used to initialize Atomwise:
+                n_in: input dimension of representation 
+                n_out: output dimension of target property (default: 1)
+                n_hidden: size of hidden layers.
+                    If an integer, same number of node is used for all hidden layers resulting
+                    in a rectangular network.
+                    If None, the number of neurons is divided by two after each layer starting
+                    n_in resulting in a pyramidal network.
+                n_layers: number of layers.
+                aggregation_mode: one of {sum, avg} (default: sum)
+                output_key: the key under which the result will be stored.
+                per_atom_output_key: If not None, the key under which the per-atom result will be stored
+        """
+        super(AtomwiseWithPrior, self).__init__()
+        self.atomwise = Atomwise(n_in = n_in, 
+                                 n_out = n_out, 
+                                 n_hidden = n_hidden, 
+                                 n_layers = n_layers, 
+                                 activation = activation, 
+                                 aggregation_mode = aggregation_mode, 
+                                 output_key = output_key, 
+                                 per_atom_output_key = per_atom_output_key)
+        
+
+        self.prior = nn.ModuleList(prior)   # Conversion from list to Modulelist for compatibility with Torchscript
+        self.output_key = output_key
+        self.model_outputs = [output_key]
+        self.combination_mode = combination_mode
+
+    def forward(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # predict atomwise contributions
+        atomwise_output = self.atomwise(inputs)[self.output_key]
+        # calculate prior energy
+        prior_output = []
+        for prior_term in self.prior:
+            prior_output.append(prior_term(inputs)[prior_term.output_key]) #tensor of size batch_size
+
+        if self.combination_mode == "sum":
+            y = atomwise_output 
+            for prior_term_output in prior_output:
+                y = y + prior_term_output
+        else: 
+            raise NotImplementedError("Specified combination mode for the prior term not available")
+
+        inputs[self.output_key] = y
         return inputs

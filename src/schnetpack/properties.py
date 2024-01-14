@@ -13,22 +13,51 @@ Z: Final[str] = "_atomic_numbers"  #: nuclear charge
 position: Final[str] = "_positions"  #: atom positions
 R: Final[str] = position  #: atom positions
 
+particle_types: Final[str] = "_particle_types"
+molecule_ids: Final[str] = "_molecule_ids"
+bonds_list: Final[str] = "_bonds_list"
+angles_list: Final[str] = "_angles_list"
+bond_types: Final[str] = "_bond_types"
+angle_types: Final[str] = "_angle_types"
+n_bonds: Final[str] = "_n_bonds"
+n_angles: Final[str] = "_n_angles"
+
 cell: Final[str] = "_cell"  #: unit cell
 strain: Final[str] = "strain"
 pbc: Final[str] = "_pbc"  #: periodic boundary conditions
 
 seg_m: Final[str] = "_seg_m"  #: start indices of systems
 idx_m: Final[str] = "_idx_m"  #: indices of systems
+idx_nbr: Final[str] = "_idx_nbr"  #: indices for neighbors list collation
 idx_i: Final[str] = "_idx_i"  #: indices of center atoms
 idx_j: Final[str] = "_idx_j"  #: indices of neighboring atoms
 idx_i_lr: Final[str] = "_idx_i_lr"  #: indices of center atoms for long-range
 idx_j_lr: Final[str] = "_idx_j_lr"  #: indices of neighboring atoms for long-range
+
+idx_of_bonds: Final[str] = "_idx_of_bonds" # to filter idx_i and Rij
+idx_non_bonds: Final[str] = "_idx_non_bonds" # to filter idx_i and Rij
+idx_of_intra: Final[str] = "_idx_of_intra" # to filter idx_i and Rij
+idx_of_inter: Final[str] = "_idx_of_inter" # to filter idx_i and Rij
+
+idx_i_bonded: Final[str] = "_idx_i_bonded"  #: indices of center atoms in bonded pairs
+idx_j_bonded: Final[str] = "_idx_j_bonded"  #: indices of neighboring atoms in bonded pairs
+idx_i_nonbonded: Final[str] = "_idx_i_nonbonded"  #: indices of center atoms in nonbonded pairs
+idx_j_nonbonded: Final[str] = "_idx_j_nonbonded"  #: indices of neighboring atoms in nonbonded pairs
+idx_i_intra: Final[str] = "_idx_i_intra"  #: indices of center atoms in intramolecular pairs
+idx_j_intra: Final[str] = "_idx_j_intra"  #: indices of neighboring atoms in intramolecular pairs
+idx_i_inter: Final[str] = "_idx_i_inter"  #: indices of center atoms in intermolecular pairs
+idx_j_inter: Final[str] = "_idx_j_inter"  #: indices of neighboring atoms in intermolecular pairs
 
 lidx_i: Final[str] = "_idx_i_local"  #: local indices of center atoms (within system)
 lidx_j: Final[
     str
 ] = "_idx_j_local"  #: local indices of neighboring atoms (within system)
 Rij: Final[str] = "_Rij"  #: vectors pointing from center atoms to neighboring atoms
+Rij_bonded: Final[str] = "_Rij_bonded"  #: subset of Rij, containing only bonded pairs
+Rij_nonbonded: Final[str] = "_Rij_nonbonded"  #: subset of Rij, containing only nonbonded pairs
+Rij_intra: Final[str] = "_Rij_intra"  #: subset of Rij, containing only intramolecular pairs
+Rij_inter: Final[str] = "_Rij_inter"  #: subset of Rij, containing only intermolecular pairs
+
 Rij_lr: Final[
     str
 ] = "_Rij_lr"  #: vectors pointing from center atoms to neighboring atoms for long range

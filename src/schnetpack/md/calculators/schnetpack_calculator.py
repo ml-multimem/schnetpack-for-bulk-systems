@@ -2,10 +2,12 @@ from __future__ import annotations
 from typing import Union, List, Dict, TYPE_CHECKING
 
 import schnetpack.atomistic.response
+from schnetpack import properties
+from schnetpack.model import NeuralNetworkPotential
 
 if TYPE_CHECKING:
-    from schnetpack.md import System
-    from schnetpack.model import AtomisticModel
+    from schnetpack.md import System  
+    from schnetpack.model import AtomisticModel  
     from schnetpack.md.neighborlist_md import NeighborListMD
 
 import torch
@@ -17,7 +19,7 @@ from schnetpack.md.utils import activate_model_stress
 
 log = logging.getLogger(__name__)
 
-__all__ = ["SchNetPackCalculator", "SchNetPackEnsembleCalculator"]
+__all__ = ["SchNetPackCalculator", "SchNetPackEnsembleCalculator", "SchNetPackCalculatorForParticles"]
 
 
 class SchNetPackCalculator(MDCalculator):
@@ -218,3 +220,143 @@ class SchNetPackEnsembleCalculator(EnsembleCalculator, SchNetPackCalculator):
             list(AtomisticModel): list of loaded models.
         """
         return [self._load_model(model_file) for model_file in model_files]
+
+
+class SchNetPackCalculatorForParticles(SchNetPackCalculator):
+    """Class to extend SchNetPackCalculator to manipulate also the 
+    additional attributes of the Particles class"""
+    def __init__(
+    self,
+    model_file: str,
+    force_key: str,
+    energy_unit: Union[str, float],
+    position_unit: Union[str, float],
+    neighbor_list: NeighborListMD,
+    energy_key: str = None,
+    stress_key: str = None,
+    required_properties: List = [],
+    property_conversion: Dict[str, Union[str, float]] = {},
+    script_model: bool = False,
+    ):
+        super().__init__(
+            model_file = model_file,
+            required_properties=required_properties,
+            force_key=force_key,
+            energy_unit=energy_unit,
+            position_unit=position_unit,
+            neighbor_list = neighbor_list,
+            energy_key=energy_key,
+            stress_key=stress_key,
+            property_conversion=property_conversion,
+            script_model = script_model
+        )
+
+    def _get_system_molecules(self, system: System):
+        """
+        Routine to extract positions, atom_types and atom_masks formatted in a manner suitable for schnetpack models
+        from the system class. This is done by collapsing the replica and molecule dimension into one batch dimension.
+
+        Args:
+            system (schnetpack.md.System): System object containing current state of the simulation.
+
+        Returns:
+            dict(str, torch.Tensor): Input batch for schnetpack models without neighbor information.
+        """
+        # Get atom types
+        atom_types = system.atom_types.repeat(system.n_replicas)
+
+        # Particle types is defined separately from the above property,
+        # which usually takes the meaning of atomic number
+        particle_types = system.particle_types.repeat(system.n_replicas)
+
+        # Get molecule ids
+        molecule_ids = system.molecule_ids.repeat(system.n_replicas)
+ 
+        # Get n_atoms
+        n_atoms = system.n_atoms#.repeat(system.n_replicas)
+
+        # Get positions
+        positions = system.positions.view(-1, 3) / self.position_conversion
+
+        # Construct index vector 
+        index_m = torch.zeros(len(system.particle_types), device=system.device).long()
+        #index_m = (
+        #    system.index_m.repeat(system.n_replicas, 1)
+        #    + system.n_molecules
+        #    * torch.arange(system.n_replicas, device=system.device).long().unsqueeze(-1)
+        #).view(-1)
+
+        # Get cells and PBC
+        cells = system.cells.view(-1, 3, 3) / self.position_conversion
+        pbc = system.pbc.repeat(system.n_replicas, 1, 1).view(-1, 3)
+
+        # Get connectivity info
+
+        bonds_list = system.bonds_list
+
+        angles_list = system.angles_list
+
+        bond_types = system.bond_types
+
+        angle_types = system.angle_types
+
+        inputs = {
+            properties.Z: atom_types,
+            properties.n_atoms: n_atoms,
+            properties.R: positions,
+            properties.idx_m: index_m,
+            properties.cell: cells[0],
+            properties.pbc: pbc[0],
+
+            properties.particle_types: particle_types,
+            properties.molecule_ids: molecule_ids, 
+            properties.bonds_list: bonds_list,
+            properties.angles_list: angles_list,
+            properties.bond_types: bond_types,
+            properties.angle_types: angle_types,
+            properties.n_bonds: system.n_bonds,
+            properties.n_angles: system.n_angles,
+        }
+
+        return inputs
+    
+    def _load_model(self, model_file: str) -> AtomisticModel:
+        """
+        Load an individual model, activate stress computation and convert to torch script if requested.
+
+        Args:
+            model_file (str): path to model.
+
+        Returns:
+           AtomisticTask: loaded schnetpack model
+        """
+
+        log.info("Loading model from {:s}".format(model_file))
+
+        # load model and keep it on CPU, device can be changed afterwards
+        loaded = torch.load(model_file, map_location="cpu")
+
+        # check if loading best_model or checkpoint
+        if isinstance(loaded, NeuralNetworkPotential):
+            model = loaded.to(torch.float64)
+        else:
+            model = loaded['hyper_parameters']['model'].to(torch.float64)
+
+        model = model.eval()
+
+        if self.stress_key is not None:
+            log.info("Activating stress computation...")
+            model = activate_model_stress(model, self.stress_key)
+
+        if self.script_model:
+            log.info("Converting model to torch script...")
+            model = torch.jit.script(model)
+
+        log.info("Deactivating inference mode for simulation...")
+        self._deactivate_postprocessing(model)
+
+        return model
+    
+    def _set_system_energy(self, system: System):
+        energy = self.results[self.energy_key]
+        system.energy = energy * self.energy_conversion 

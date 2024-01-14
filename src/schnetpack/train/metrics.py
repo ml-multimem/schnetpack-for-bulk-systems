@@ -1,4 +1,5 @@
 import torch
+from torch import Tensor, tensor
 from torchmetrics import Metric
 from torchmetrics.functional.regression.mae import (
     _mean_absolute_error_compute,
@@ -7,7 +8,7 @@ from torchmetrics.functional.regression.mae import (
 
 from typing import Optional, Tuple
 
-__all__ = ["TensorDiagonalMeanAbsoluteError"]
+__all__ = ["TensorDiagonalMeanAbsoluteError", "Monitor"]
 
 
 class TensorDiagonalMeanAbsoluteError(Metric):
@@ -117,3 +118,34 @@ class TensorDiagonalMeanAbsoluteError(Metric):
             return diag_mask == 1
         else:
             return diag_mask != 1
+
+class Monitor(Metric):
+    """Monitor is used to output the average value of a predicted quantity
+       Since Metric objects expect a prediction and a target, the property_list
+       of the dataset needs to contain a list of dummy values for each property 
+       that is to be monitored. These are ignored by Monitor.
+    """
+    sum_values_per_batch: Tensor
+    total: Tensor
+    
+    def __init__(self):
+        super(Monitor, self).__init__()
+        self.add_state("sum_values_per_batch", default=tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total", default=tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds, target):
+        """Update state with predictions and targets.
+
+        Args:
+            preds: Predictions from model to aggregate and output
+            target: Dummy values ignored by Monitor
+        """
+        self.sum_values_per_batch += torch.sum(preds).detach()   
+        num = preds.size()[0] if len(preds.size())>0 else 1
+        self.total += num
+
+    def compute(self):
+        """Computes mean value of the prediction over state."""
+        return self.sum_values_per_batch / self.total
+        
+        

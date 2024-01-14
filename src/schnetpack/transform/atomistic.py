@@ -111,7 +111,7 @@ class RemoveOffsets(Transform):
             atomrefs = atomrefs or torch.zeros((zmax,))
             self.register_buffer("atomref", atomrefs)
         if self.remove_mean:
-            property_mean = property_mean or torch.zeros((1,))
+            property_mean = torch.tensor(property_mean) or torch.zeros((1,))
             self.register_buffer("mean", property_mean)
 
     def datamodule(self, _datamodule):
@@ -133,7 +133,8 @@ class RemoveOffsets(Transform):
         inputs: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         if self.remove_mean:
-            inputs[self._property] -= self.mean * inputs[structure.n_atoms]
+            #inputs[self._property] -= self.mean * inputs[structure.n_atoms]
+            inputs[self._property] -= self.mean 
 
         if self.remove_atomrefs:
             inputs[self._property] -= torch.sum(self.atomref[inputs[structure.Z]])
@@ -260,7 +261,7 @@ class AddOffsets(Transform):
             self._mean_initialized = False
 
         atomrefs = atomrefs or torch.zeros((zmax,))
-        property_mean = property_mean or torch.zeros((1,))
+        property_mean = torch.tensor(property_mean) or torch.zeros((1,))
         self.register_buffer("atomref", atomrefs)
         self.register_buffer("mean", property_mean)
 
@@ -281,7 +282,8 @@ class AddOffsets(Transform):
     ) -> Dict[str, torch.Tensor]:
         if self.add_mean:
             mean = (
-                self.mean * inputs[structure.n_atoms]
+                #self.mean * inputs[structure.n_atoms]
+                self.mean
                 if self.is_extensive
                 else self.mean
             )

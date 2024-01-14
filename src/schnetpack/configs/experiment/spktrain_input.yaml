@@ -1,0 +1,195 @@
+# @package _global_
+
+run:
+  work_dir: ${hydra:runtime.cwd}
+  data_dir: ${run.work_dir}/data
+  path: runs
+  experiment: default
+  id: ${uuid:1}
+  
+globals:
+  model_path: best_model
+  cutoff: 7.0
+  lr: 0.0001
+  intermol_energy_key: intermol_energy
+  excluded_volume_energy_key: excluded_volume_energy
+  total_energy_key: total_energy
+  forces_key: forces
+  
+data:
+  _target_: schnetpack.data.ParticlesDataModule
+  datapath: /home/ericci/SPK_RUNS/datasets/benzene_500mol_300K_10kframes_1CG.db
+  data_workdir: null
+  batch_size: 10
+  num_train: 90
+  num_val: 10
+  num_test: null
+  num_workers: 8
+  num_val_workers: null
+  num_test_workers: null
+  distance_unit: Ang
+  property_units:
+    intermol_energy: kcal/mol
+    excluded_volume_energy: kcal/mol
+    total_energy: kcal/mol
+    forces: kcal/mol/Ang
+  transforms:
+  - _target_: schnetpack.transform.ASENeighborList
+    cutoff: ${globals.cutoff}
+  - _target_: schnetpack.transform.CastTo32
+  - _target_: schnetpack.transform.RemoveOffsets
+    property: ${globals.intermol_energy_key}
+    remove_mean: true
+    property_mean: -1100.
+  
+trainer:
+  _target_: pytorch_lightning.Trainer
+  devices: 1
+  min_epochs: null
+  max_epochs: 100
+  enable_model_summary: true
+  profiler: null
+  gradient_clip_val: 0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 0
+  fast_dev_run: false
+  overfit_batches: 0
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  limit_test_batches: 1.0
+  track_grad_norm: -1
+  detect_anomaly: false
+  amp_backend: native
+  amp_level: null
+  precision: 32
+  accelerator: auto
+  num_nodes: 1
+  tpu_cores: null
+  deterministic: false
+  inference_mode: false
+  resume_from_checkpoint: null
+  log_every_n_steps: 1
+  
+callbacks:
+  model_checkpoint:
+    _target_: schnetpack.train.ModelCheckpoint
+    monitor: val_loss
+    save_top_k: 3
+    save_last: true
+    mode: min
+    verbose: false
+    dirpath: checkpoints/
+    filename: '{epoch:02d}'
+    model_path: ${globals.model_path}
+  early_stopping:
+    _target_: pytorch_lightning.callbacks.EarlyStopping
+    monitor: val_loss
+    patience: 200
+    mode: min
+    min_delta: 0.0
+    check_on_train_epoch_end: false
+  lr_monitor:
+    _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: epoch
+  ema:
+    _target_: schnetpack.train.ExponentialMovingAverage
+    decay: 0.995
+    
+task:
+  optimizer_cls: torch.optim.AdamW
+  optimizer_args:
+    lr: ${globals.lr}
+    weight_decay: 0.0
+  scheduler_cls: schnetpack.train.ReduceLROnPlateau
+  scheduler_monitor: val_loss
+  scheduler_args:
+    mode: min
+    factor: 0.5
+    patience: 75
+    threshold: 0.0
+    threshold_mode: rel
+    cooldown: 10
+    min_lr: 0.0
+    smoothing_factor: 0.0
+  _target_: schnetpack.AtomisticTask
+  outputs:
+  - _target_: schnetpack.task.ModelOutput
+    name: ${globals.intermol_energy_key}
+    loss_fn:
+      _target_: torch.nn.MSELoss
+    metrics:
+      mse:
+        _target_: torchmetrics.regression.MeanSquaredError
+    loss_weight: 0.01
+  - _target_: schnetpack.task.ModelOutput
+    name: ${globals.forces_key}
+    loss_fn:
+      _target_: torch.nn.MSELoss
+    metrics:
+      mse:
+        _target_: torchmetrics.regression.MeanSquaredError
+    loss_weight: 1
+  - _target_: schnetpack.task.ModelOutput
+    name: ${globals.excluded_volume_energy_key}
+    metrics:
+      monitor:
+        _target_: schnetpack.train.metrics.Monitor
+  - _target_: schnetpack.task.ModelOutput
+    name: ${globals.intermol_energy_key}
+    metrics:
+      monitor:
+        _target_: schnetpack.train.metrics.Monitor
+  warmup_steps: 0
+  
+logger:
+  csv:
+    _target_: pytorch_lightning.loggers.csv_logs.CSVLogger
+    save_dir: .
+    name: csv/
+    
+seed: 17
+
+model:
+  _target_: schnetpack.model.NeuralNetworkPotential
+  representation:
+    _target_: schnetpack.representation.SchNet
+    n_atom_basis: 240
+    n_filters: 256
+    n_interactions: 2
+    radial_basis:
+      _target_: schnetpack.nn.GaussianRBF
+      n_rbf: 80
+      cutoff: ${globals.cutoff}
+    cutoff_fn:
+      _target_: schnetpack.nn.SwitchFunction
+      switch_on: 0.0
+      switch_off: ${globals.cutoff}
+  input_modules:
+  - _target_: schnetpack.atomistic.PairwiseDistances
+  output_modules:
+  - _target_: schnetpack.atomistic.AtomwiseWithPrior
+    output_key: ${globals.intermol_energy_key}
+    n_in: ${model.representation.n_atom_basis}
+    aggregation_mode: sum
+    prior:
+      _target_: schnetpack.atomistic.ExcludedVolumeEnergy
+      sigma: 5.0
+      exponent: 5
+      output_key: ${globals.excluded_volume_energy_key}
+  - _target_: schnetpack.atomistic.Forces
+    energy_key: ${globals.intermol_energy_key}
+    force_key: ${globals.forces_key}
+  - _target_: schnetpack.atomistic.ExcludedVolumeEnergy
+    sigma: 5.0
+    exponent: 5
+    output_key: ${globals.excluded_volume_energy_key}
+  postprocessors:
+  - _target_: schnetpack.transform.CastTo64
+  - _target_: schnetpack.transform.AddOffsets
+    property: ${globals.intermol_energy_key}
+    add_mean: true
+    property_mean: -1100.
+  
+print_config: true

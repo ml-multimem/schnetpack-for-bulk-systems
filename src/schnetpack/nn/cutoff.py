@@ -137,6 +137,7 @@ class SwitchFunction(nn.Module):
         super(SwitchFunction, self).__init__()
         self.register_buffer("switch_on", torch.Tensor([switch_on]))
         self.register_buffer("switch_off", torch.Tensor([switch_off]))
+        self.register_buffer("cutoff", torch.Tensor([switch_off]))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

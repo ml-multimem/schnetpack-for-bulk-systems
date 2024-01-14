@@ -20,12 +20,16 @@ from schnetpack.md.utils import get_npt_integrator, is_rpmd_integrator, MDConfig
 from pytorch_lightning import seed_everything
 
 from ase.io import read
+from schnetpack.md.io.particlesdb import read_particles_db
+
+import numpy as np
 
 log = logging.getLogger(__name__)
 
 OmegaConf.register_new_resolver("uuid", lambda x: str(uuid.uuid1()))
 OmegaConf.register_new_resolver("tmpdir", tempfile.mkdtemp, use_cache=True)
 
+from schnetpack.md.system_of_particles import SystemOfParticles
 
 class MDSetupError(Exception):
     pass
@@ -109,7 +113,12 @@ def simulate(config: DictConfig):
     # ===========================================
 
     log.info("Setting up system...")
-    system = schnetpack.md.System()
+
+    if hasattr(config, 'systemclass'):
+        system = hydra.utils.instantiate(config.systemclass)
+    else:
+        system = schnetpack.md.System()
+
     if config.system.load_system_state is not None:
         state_dict = torch.load(
             hydra.utils.to_absolute_path(config.system.load_system_state)
@@ -121,14 +130,28 @@ def simulate(config: DictConfig):
             )
         )
     else:
-        molecules = read(
-            hydra.utils.to_absolute_path(config.system.molecule_file), index=":"
-        )
-        log.info(
-            "Found {:d} molecule{:s}".format(
-                len(molecules), ("", "s")[len(molecules) > 1]
+        if isinstance(system, SystemOfParticles):
+            molecules = read_particles_db(
+                hydra.utils.to_absolute_path(config.system.molecule_file), index=":"
             )
-        )
+            n_molecules = len(np.unique(molecules[0].arrays['molecule_ids']))
+
+            log.info(
+                "Found {:d} molecule{:s}".format(
+                    n_molecules, ("", "s")[n_molecules > 1]
+                )
+            )
+        else:
+            molecules = read(
+                hydra.utils.to_absolute_path(config.system.molecule_file), index=":"
+            )
+
+            log.info(
+                "Found {:d} molecule{:s}".format(
+                    len(molecules), ("", "s")[len(molecules) > 1]
+                )
+            )
+
         log.info(
             "Using {:d} replica{:s}".format(
                 config.system.n_replicas, ("", "s")[config.system.n_replicas > 1]
@@ -162,10 +185,11 @@ def simulate(config: DictConfig):
         # Get primitive neighbor list
         if "base_nbl" in nbl_config:
             log.info(
-                "Using {:s} neighbor list as base...".format(nbl_config["base_nbl"])
+                "Using {:s} neighbor list as base...".format(nbl_config["_target_"])
             )
-            nbl_config["base_nbl"] = str2class(nbl_config["base_nbl"])
-
+            nbl_config["base_nbl"]["cutoff"] = calculator_config["neighbor_list"]["cutoff"] + calculator_config["neighbor_list"]["cutoff_shell"]
+            nbl_config["base_nbl"] = hydra.utils.instantiate(nbl_config["base_nbl"])
+            
         # Get collate function
         if "collate_fn" in nbl_config:
             nbl_config["collate_fn"] = str2class(nbl_config["collate_fn"])

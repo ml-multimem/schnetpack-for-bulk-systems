@@ -22,6 +22,7 @@ def _atoms_collate_fn(batch):
     """
     elem = batch[0]
     idx_keys = {structure.idx_i, structure.idx_j, structure.idx_i_triples}
+    
     # Atom triple indices must be treated separately
     idx_triple_keys = {structure.idx_j_triples, structure.idx_k_triples}
 
@@ -43,6 +44,22 @@ def _atoms_collate_fn(batch):
         if key in elem.keys():
             coll_batch[key] = torch.cat(
                 [d[key] + off for d, off in zip(batch, seg_m)], 0
+            )
+
+    coll_batch["nbr_tot"] = torch.cat([torch.tensor([batch[i]["_idx_i"].size()[0]]).detach() for i in range(len(batch))] , 0)
+    seg_nbr = torch.cumsum(coll_batch["nbr_tot"], dim=0)
+    seg_nbr = torch.cat([torch.zeros((1,), dtype=seg_nbr.dtype), seg_nbr], dim=0)
+    idx_nbr = torch.repeat_interleave(
+        torch.arange(len(batch)), repeats=coll_batch["nbr_tot"], dim=0
+    )
+    coll_batch[structure.idx_nbr] = idx_nbr
+
+    nbr_idx_keys = {structure.idx_of_bonds, structure.idx_non_bonds, structure.idx_of_inter, structure.idx_of_intra}
+    
+    for key in nbr_idx_keys:
+        if key in elem.keys():
+            coll_batch[key] = torch.cat(
+                [d[key] + off for d, off in zip(batch, seg_nbr)], 0
             )
 
     # Shift the indices for the atom triples

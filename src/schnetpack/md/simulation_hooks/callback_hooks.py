@@ -217,9 +217,9 @@ class MoleculeStream(DataStream):
         Args:
             simulator (schnetpack.md.Simulator): Simulator class used in the molecular dynamics simulation.
         """
-        # Account for potential energy and positions
+        # Account for potential energy and positions and images
         data_dimension = (
-            simulator.system.n_molecules + simulator.system.total_n_atoms * 3
+            simulator.system.n_molecules + simulator.system.total_n_atoms * 3 * 2
         )
 
         # If requested, also store velocities
@@ -281,6 +281,13 @@ class MoleculeStream(DataStream):
             buffer_position : buffer_position + 1, :, start:stop
         ] = simulator.system.positions.view(simulator.system.n_replicas, -1).detach()
 
+        # Store img
+        start = stop
+        stop += simulator.system.total_n_atoms * 3
+        self.buffer[
+            buffer_position : buffer_position + 1, :, start:stop
+        ] = simulator.system.images.view(simulator.system.n_replicas, -1).detach()
+
         if self.store_velocities:
             start = stop
             stop += simulator.system.total_n_atoms * 3
@@ -293,14 +300,14 @@ class MoleculeStream(DataStream):
         if self.cells:
             # Get cells
             start = stop
-            stop += 9 * simulator.system.n_molecules
+            stop += 9
             self.buffer[
                 buffer_position : buffer_position + 1, :, start:stop
-            ] = simulator.system.cells.view(simulator.system.n_replicas, -1).detach()
+            ] = simulator.system.cells[0][0].view(simulator.system.n_replicas, -1).detach()
 
             # Get stress tensors
             start = stop
-            stop += 9 * simulator.system.n_molecules
+            stop += 9
             self.buffer[
                 buffer_position : buffer_position + 1, :, start:stop
             ] = simulator.system.stress.view(simulator.system.n_replicas, -1).detach()
@@ -366,7 +373,7 @@ class PropertyStream(DataStream):
 
     def update_buffer(self, buffer_position: int, simulator: Simulator):
         """
-        Routine for updating the property buffer.
+        Routine for updating the propery buffer.
 
         Args:
             buffer_position (int): Current position in the buffer.

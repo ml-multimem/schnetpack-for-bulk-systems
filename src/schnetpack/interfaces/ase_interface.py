@@ -492,7 +492,8 @@ class AseInterface:
             header=True,
             mode="a",
         )
-        trajectory = Trajectory(trajfile, "w", self.molecule)
+        trajectory = Trajectory(trajfile, "a", self.molecule) 
+            # Changed "w" to "a" otherwise only the last snapshot was retained
 
         # Attach monitors to trajectory
         self.dynamics.attach(logger, interval=interval)
